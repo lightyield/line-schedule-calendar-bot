@@ -34,6 +34,8 @@ jobs:
         run: npx clasp push --force
 
       - name: Deploy (Optional)
-        if: "${{ secrets.GAS_DEPLOYMENT_ID != '' }}"
+        env:
+          GAS_DEPLOYMENT_ID: ${{ secrets.GAS_DEPLOYMENT_ID }}
+        if: env.GAS_DEPLOYMENT_ID != ''
         run: |
-          npx clasp deploy --deploymentId "${{ secrets.GAS_DEPLOYMENT_ID }}" --description "Automated deploy from GitHub Actions"
+          npx clasp deploy --deploymentId "${{ env.GAS_DEPLOYMENT_ID }}" --description "Automated deploy from GitHub Actions"
