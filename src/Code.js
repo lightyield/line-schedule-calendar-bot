@@ -77,6 +77,16 @@ function getSourceId(source) {
 function setupDebounceTrigger() {
   cleanupTriggers();
   
+  // スプレッドシートIDを自動保存（時限トリガーでのgetActiveSpreadsheetのnull対策）
+  try {
+    var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    if (spreadsheet) {
+      PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', spreadsheet.getId());
+    }
+  } catch (err) {
+    console.warn('Failed to save SPREADSHEET_ID in setupDebounceTrigger: ' + err.toString());
+  }
+  
   // 30秒後（30000ミリ秒）に実行するトリガーを新規作成
   ScriptApp.newTrigger('processBuffer')
     .timeBased()
@@ -107,7 +117,27 @@ function processBuffer() {
   // トリガーの重複実行を避けるためにトリガーを初期化
   cleanupTriggers();
 
-  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var properties = PropertiesService.getScriptProperties();
+  var ssId = properties.getProperty('SPREADSHEET_ID');
+  var spreadsheet = null;
+
+  if (ssId) {
+    try {
+      spreadsheet = SpreadsheetApp.openById(ssId);
+    } catch (err) {
+      console.warn('Failed to open spreadsheet by SPREADSHEET_ID: ' + err.toString());
+    }
+  }
+  
+  if (!spreadsheet) {
+    spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  }
+
+  if (!spreadsheet) {
+    console.error('Spreadsheet could not be accessed.');
+    return;
+  }
+
   var sheet = spreadsheet.getSheetByName('buffer');
   if (!sheet) return;
 
@@ -154,14 +184,14 @@ function processBuffer() {
       // Gemini APIを呼び出し
       var calendarMarkdown = callGemini(combinedText);
 
-      // LINEに返答を送信
-      replyToLine(group.replyToken, calendarMarkdown);
+      // LINEにプッシュメッセージを送信（デバウンス処理による遅延でreplyTokenが失効するため、Push APIを使用）
+      pushToLine(sourceId, calendarMarkdown);
     } catch (err) {
       console.error('Error processing buffer for source ' + sourceId + ': ' + err.toString());
       
-      // エラーメッセージをLINEに返信（ユーザーへの通知とデバッグのしやすさを向上）
+      // エラーメッセージをLINEに送信
       try {
-        replyToLine(group.replyToken, '【エラー】カレンダー生成中にエラーが発生しました。\n' + err.toString());
+        pushToLine(sourceId, '【エラー】カレンダー生成中にエラーが発生しました。\n' + err.toString());
       } catch (replyErr) {
         console.error('Failed to send error reply: ' + replyErr.toString());
       }
@@ -170,11 +200,12 @@ function processBuffer() {
 }
 
 /**
- * LINE Messaging APIを用いて応答メッセージを送信します。
- * @param {string} replyToken 応答用トークン
+ * LINE Messaging APIを用いてプッシュメッセージを送信します。
+ * 応答メッセージ (replyToken) は有効期限が非常に短いため、遅延処理を行う本Botではプッシュメッセージを使用します。
+ * @param {string} toId 送信先ID（ユーザーID、グループID、またはルームID）
  * @param {string} text 送信するテキストメッセージ
  */
-function replyToLine(replyToken, text) {
+function pushToLine(toId, text) {
   var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
   if (!token) {
     throw new Error('LINE_CHANNEL_ACCESS_TOKEN がスクリプトプロパティに設定されていません。');
@@ -185,9 +216,9 @@ function replyToLine(replyToken, text) {
     text = text.substring(0, 4990) + '\n...（省略されました）';
   }
 
-  var url = 'https://api.line.me/v2/bot/message/reply';
+  var url = 'https://api.line.me/v2/bot/message/push';
   var payload = {
-    replyToken: replyToken,
+    to: toId,
     messages: [
       {
         type: 'text',
@@ -211,6 +242,6 @@ function replyToLine(replyToken, text) {
   var responseText = response.getContentText();
 
   if (responseCode !== 200) {
-    throw new Error('LINE Reply API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
+    throw new Error('LINE Push API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
   }
 }

@@ -45,28 +45,23 @@ function callGemini(text) {
     throw new Error('GEMINI_API_KEY がスクリプトプロパティに設定されていません。');
   }
 
-  var model = properties.getProperty('GEMINI_MODEL') || 'gemini-2.0-flash';
-  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + apiKey;
+  var model = properties.getProperty('GEMINI_MODEL') || 'gemini-3.5-flash';
+  var url = 'https://generativelanguage.googleapis.com/v1/models/' + model + ':generateContent?key=' + apiKey;
 
   var systemInstruction = getSystemPrompt();
+  // systemInstructionがAPI v1で動作しない場合があるため、プロンプトの冒頭に指示を結合して送信します
+  var combinedPrompt = systemInstruction + '\n\n【スケジュール情報】\n' + text;
 
   var payload = {
     contents: [
       {
         parts: [
           {
-            text: text
+            text: combinedPrompt
           }
         ]
       }
     ],
-    systemInstruction: {
-      parts: [
-        {
-          text: systemInstruction
-        }
-      ]
-    },
     generationConfig: {
       temperature: 0.2
     }
