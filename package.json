@@ -1,0 +1,31 @@
+{
+  "name": "line-schedule-calendar-bot",
+  "version": "1.0.0",
+  "description": "LINEで転送された複数のスケジュールメッセージ（スクールの連絡文など）を自動で集約し、Gemini APIを用いて指定フォーマットのマークダウン形式月別カレンダー（表）に変換して返信するLINE Botシステムです。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "login": "clasp login",
+    "push": "clasp push",
+    "pull": "clasp pull",
+    "deploy": "clasp deploy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lightyield/line-schedule-calendar-bot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/lightyield/line-schedule-calendar-bot/issues"
+  },
+  "homepage": "https://github.com/lightyield/line-schedule-calendar-bot#readme",
+  "devDependencies": {
+    "@google/clasp": "^3.3.0"
+  }
+}
