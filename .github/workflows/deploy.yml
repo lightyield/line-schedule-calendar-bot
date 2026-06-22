@@ -1,0 +1,39 @@
+name: Deploy to Google Apps Script
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup clasp credentials
+        run: |
+          echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
+
+      - name: Configure script ID
+        run: |
+          echo '{"scriptId":"${{ secrets.GAS_SCRIPT_ID }}","rootDir":"src"}' > .clasp.json
+
+      - name: Clasp push
+        run: npx clasp push --force
+
+      - name: Deploy (Optional)
+        if: "${{ secrets.GAS_DEPLOYMENT_ID != '' }}"
+        run: |
+          npx clasp deploy --deploymentId "${{ secrets.GAS_DEPLOYMENT_ID }}" --description "Automated deploy from GitHub Actions"
