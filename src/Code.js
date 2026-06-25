@@ -191,7 +191,15 @@ function processBuffer() {
       
       // エラーメッセージをLINEに送信
       try {
-        pushToLine(sourceId, '【エラー】カレンダー生成中にエラーが発生しました。\n' + err.toString());
+        var errorMessage = '【エラー】カレンダー生成中にエラーが発生しました。\n' + err.toString();
+        var errStr = err.toString();
+        
+        // Gemini APIの一時的なエラー（503や429など）または混雑エラーの場合
+        if (errStr.indexOf('Gemini API エラー') !== -1 && (errStr.indexOf('503') !== -1 || errStr.indexOf('429') !== -1 || errStr.indexOf('UNAVAILABLE') !== -1)) {
+          errorMessage = '【エラー】現在、Google側のAIサーバーが大変混雑しています。\n\n一時的な問題であるため、恐れ入りますが少し時間（数分〜数十分程度）を置いてから、再度スケジュールを送信してみてください。';
+        }
+        
+        pushToLine(sourceId, errorMessage);
       } catch (replyErr) {
         console.error('Failed to send error reply: ' + replyErr.toString());
       }
