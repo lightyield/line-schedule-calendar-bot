@@ -74,18 +74,49 @@ function callGemini(text) {
     muteHttpExceptions: true
   };
 
-  var response = UrlFetchApp.fetch(url, options);
-  var responseCode = response.getResponseCode();
-  var responseText = response.getContentText();
+  var maxRetries = 3;      // 最大リトライ回数
+  var baseDelay = 2000;    // 初回待機時間（2秒）
+  var lastError = null;
 
-  if (responseCode !== 200) {
-    throw new Error('Gemini API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
+  for (var attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      var response = UrlFetchApp.fetch(url, options);
+      var responseCode = response.getResponseCode();
+      var responseText = response.getContentText();
+
+      // 正常レスポンス
+      if (responseCode === 200) {
+        var json = JSON.parse(responseText);
+        if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts && json.candidates[0].content.parts[0]) {
+          return json.candidates[0].content.parts[0].text;
+        } else {
+          throw new Error('Gemini APIのレスポンス構造が不正です: ' + responseText);
+        }
+      }
+
+      // エラーオブジェクトを生成
+      lastError = new Error('Gemini API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
+
+      // 一時的なエラー（503: サービス一時停止、429: レート制限）以外の場合はリトライせず即時スロー
+      var isTransientError = (responseCode === 503 || responseCode === 429);
+      if (!isTransientError) {
+        throw lastError;
+      }
+
+      console.warn('Gemini APIが一時的エラー ' + responseCode + ' を返しました。' + (attempt + 1) + '回目の試行のあと、リトライします。');
+
+    } catch (err) {
+      lastError = err;
+      console.warn('API呼び出し中に例外が発生しました: ' + err.toString());
+    }
+
+    // 次のリトライに向けて待機 (2秒 -> 4秒 と倍増)
+    if (attempt < maxRetries - 1) {
+      var delay = baseDelay * Math.pow(2, attempt);
+      Utilities.sleep(delay);
+    }
   }
 
-  var json = JSON.parse(responseText);
-  if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts && json.candidates[0].content.parts[0]) {
-    return json.candidates[0].content.parts[0].text;
-  } else {
-    throw new Error('Gemini APIのレスポンス構造が不正です: ' + responseText);
-  }
+  // すべてのリトライが失敗した場合は最終エラーをスロー
+  throw lastError;
 }
