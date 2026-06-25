@@ -35,6 +35,8 @@ function getSystemPrompt() {
 
 /**
  * Gemini API を呼び出してカレンダー形式のテキストを生成します。
+ * 一時的エラー（503/429）発生時は指数バックオフでリトライし、
+ * すべて失敗した場合はフォールバックモデルで再試行します。
  * @param {string} text 結合されたメッセージテキスト
  * @return {string} 生成されたカレンダーのマークダウンテキスト
  */
@@ -45,8 +47,8 @@ function callGemini(text) {
     throw new Error('GEMINI_API_KEY がスクリプトプロパティに設定されていません。');
   }
 
-  var model = properties.getProperty('GEMINI_MODEL') || 'gemini-3.5-flash';
-  var url = 'https://generativelanguage.googleapis.com/v1/models/' + model + ':generateContent?key=' + apiKey;
+  var primaryModel = properties.getProperty('GEMINI_MODEL') || 'gemini-3.5-flash';
+  var fallbackModel = properties.getProperty('GEMINI_FALLBACK_MODEL') || 'gemini-2.5-flash';
 
   var systemInstruction = getSystemPrompt();
   // systemInstructionがAPI v1で動作しない場合があるため、プロンプトの冒頭に指示を結合して送信します
@@ -67,6 +69,37 @@ function callGemini(text) {
     }
   };
 
+  // まずプライマリモデルで試行
+  var result = callGeminiWithRetry_(apiKey, primaryModel, payload);
+  if (result.success) {
+    return result.text;
+  }
+
+  // プライマリモデルが一時的エラーで全リトライ失敗した場合、フォールバックモデルで再試行
+  if (result.isTransientError && fallbackModel !== primaryModel) {
+    console.info('プライマリモデル (' + primaryModel + ') が利用不可のため、フォールバックモデル (' + fallbackModel + ') で再試行します。');
+    var fallbackResult = callGeminiWithRetry_(apiKey, fallbackModel, payload);
+    if (fallbackResult.success) {
+      return fallbackResult.text;
+    }
+    // フォールバックも失敗した場合は、フォールバックのエラーをスロー
+    throw fallbackResult.lastError;
+  }
+
+  // 一時的エラーではない場合、またはフォールバックなしの場合
+  throw result.lastError;
+}
+
+/**
+ * 指定モデルに対してリトライ付きでGemini APIを呼び出します。
+ * @param {string} apiKey APIキー
+ * @param {string} model モデル名
+ * @param {Object} payload リクエストボディ
+ * @return {Object} { success: boolean, text?: string, lastError?: Error, isTransientError: boolean }
+ */
+function callGeminiWithRetry_(apiKey, model, payload) {
+  var url = 'https://generativelanguage.googleapis.com/v1/models/' + model + ':generateContent?key=' + apiKey;
+
   var options = {
     method: 'post',
     contentType: 'application/json',
@@ -74,49 +107,65 @@ function callGemini(text) {
     muteHttpExceptions: true
   };
 
-  var maxRetries = 3;      // 最大リトライ回数
-  var baseDelay = 2000;    // 初回待機時間（2秒）
+  var maxRetries = 5;      // 最大リトライ回数
+  var baseDelay = 3000;    // 初回待機時間（3秒）
   var lastError = null;
+  var wasTransientError = false;
 
   for (var attempt = 0; attempt < maxRetries; attempt++) {
+    var response;
     try {
-      var response = UrlFetchApp.fetch(url, options);
-      var responseCode = response.getResponseCode();
-      var responseText = response.getContentText();
+      response = UrlFetchApp.fetch(url, options);
+    } catch (networkErr) {
+      // ネットワークレベルの例外（タイムアウト等）
+      lastError = networkErr;
+      wasTransientError = true;
+      console.warn('モデル ' + model + ': API呼び出し中にネットワーク例外が発生しました（' + (attempt + 1) + '/' + maxRetries + '回目）: ' + networkErr.toString());
 
-      // 正常レスポンス
-      if (responseCode === 200) {
-        var json = JSON.parse(responseText);
-        if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts && json.candidates[0].content.parts[0]) {
-          return json.candidates[0].content.parts[0].text;
-        } else {
-          throw new Error('Gemini APIのレスポンス構造が不正です: ' + responseText);
-        }
+      if (attempt < maxRetries - 1) {
+        var networkDelay = baseDelay * Math.pow(2, attempt);
+        Utilities.sleep(networkDelay);
       }
-
-      // エラーオブジェクトを生成
-      lastError = new Error('Gemini API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
-
-      // 一時的なエラー（503: サービス一時停止、429: レート制限）以外の場合はリトライせず即時スロー
-      var isTransientError = (responseCode === 503 || responseCode === 429);
-      if (!isTransientError) {
-        throw lastError;
-      }
-
-      console.warn('Gemini APIが一時的エラー ' + responseCode + ' を返しました。' + (attempt + 1) + '回目の試行のあと、リトライします。');
-
-    } catch (err) {
-      lastError = err;
-      console.warn('API呼び出し中に例外が発生しました: ' + err.toString());
+      continue;
     }
 
-    // 次のリトライに向けて待機 (2秒 -> 4秒 と倍増)
+    var responseCode = response.getResponseCode();
+    var responseText = response.getContentText();
+
+    // 正常レスポンス
+    if (responseCode === 200) {
+      var json = JSON.parse(responseText);
+      if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts && json.candidates[0].content.parts[0]) {
+        return { success: true, text: json.candidates[0].content.parts[0].text, isTransientError: false };
+      } else {
+        return {
+          success: false,
+          lastError: new Error('Gemini APIのレスポンス構造が不正です: ' + responseText),
+          isTransientError: false
+        };
+      }
+    }
+
+    // エラーオブジェクトを生成
+    lastError = new Error('Gemini API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
+
+    // 一時的なエラー（503: サービス一時停止、429: レート制限）以外の場合はリトライせず即時返却
+    var isTransientError = (responseCode === 503 || responseCode === 429);
+    if (!isTransientError) {
+      return { success: false, lastError: lastError, isTransientError: false };
+    }
+
+    wasTransientError = true;
+
     if (attempt < maxRetries - 1) {
+      console.warn('モデル ' + model + ': 一時的エラー ' + responseCode + '（' + (attempt + 1) + '/' + maxRetries + '回目）。リトライします...');
       var delay = baseDelay * Math.pow(2, attempt);
       Utilities.sleep(delay);
+    } else {
+      console.warn('モデル ' + model + ': 一時的エラー ' + responseCode + '（' + (attempt + 1) + '/' + maxRetries + '回目）。リトライ上限に達しました。');
     }
   }
 
-  // すべてのリトライが失敗した場合は最終エラーをスロー
-  throw lastError;
+  // すべてのリトライが失敗
+  return { success: false, lastError: lastError, isTransientError: wasTransientError };
 }
