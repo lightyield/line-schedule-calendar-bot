@@ -181,11 +181,23 @@ function processBuffer() {
     var combinedText = group.texts.join('\n---\n');
 
     try {
-      // Gemini APIを呼び出し
-      var calendarMarkdown = callGemini(combinedText);
+      // Gemini APIを呼び出してJSON文字列を取得
+      var calendarJson = callGemini(combinedText);
 
-      // LINEにプッシュメッセージを送信（デバウンス処理による遅延でreplyTokenが失効するため、Push APIを使用）
-      pushToLine(sourceId, calendarMarkdown);
+      // Geminiが ```json ... ``` を付けてしまうケースに備えてクリーニング
+      var cleaned = calendarJson.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+      var geminiResult;
+      try {
+        geminiResult = JSON.parse(cleaned);
+      } catch (parseErr) {
+        console.error('JSON parse error: ' + parseErr.toString() + '\nRaw response: ' + calendarJson);
+        throw new Error('カレンダーデータの解析に失敗しました。再度スケジュールを送信してみてください。');
+      }
+
+      // Flex Message（Carousel）を組み立ててLINEにプッシュ送信
+      // （デバウンス処理による遅延でreplyTokenが失効するため、Push APIを使用）
+      var flexMessage = buildCarouselFlexMessage(geminiResult);
+      pushFlexToLine(sourceId, flexMessage);
     } catch (err) {
       console.error('Error processing buffer for source ' + sourceId + ': ' + err.toString());
       
@@ -252,4 +264,248 @@ function pushToLine(toId, text) {
   if (responseCode !== 200) {
     throw new Error('LINE Push API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
   }
+}
+
+/**
+ * LINE Messaging API を用いてFlex Messageをプッシュ送信します。
+ * @param {string} toId 送信先ID（ユーザーID、グループID、またはルームID）
+ * @param {Object} flexMessage { altText: string, contents: Object } Flex Messageオブジェクト
+ */
+function pushFlexToLine(toId, flexMessage) {
+  var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+  if (!token) {
+    throw new Error('LINE_CHANNEL_ACCESS_TOKEN がスクリプトプロパティに設定されていません。');
+  }
+
+  var url = 'https://api.line.me/v2/bot/message/push';
+  var payload = {
+    to: toId,
+    messages: [
+      {
+        type: 'flex',
+        altText: flexMessage.altText,
+        contents: flexMessage.contents
+      }
+    ]
+  };
+
+  var options = {
+    method: 'post',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + token
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  var response = UrlFetchApp.fetch(url, options);
+  var responseCode = response.getResponseCode();
+  var responseText = response.getContentText();
+
+  if (responseCode !== 200) {
+    throw new Error('LINE Push API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
+  }
+}
+
+/**
+ * GeminiのJSONからLINE Flex Message（単月はBubble、複数月はCarousel）を組み立てます。
+ * @param {Object} geminiResult Geminiが返したパース済みJSONオブジェクト { months: Array }
+ * @return {Object} { altText: string, contents: Object } LINE Flex Messageオブジェクト
+ */
+function buildCarouselFlexMessage(geminiResult) {
+  var months = geminiResult.months || [];
+  var bubbles = [];
+  for (var i = 0; i < months.length; i++) {
+    bubbles.push(buildMonthBubble(months[i]));
+  }
+
+  // altText生成（例: "2026年7月・8月のカレンダー"）
+  var altTextParts = [];
+  for (var j = 0; j < months.length; j++) {
+    var parts = months[j].target_month.split('-');
+    altTextParts.push(parseInt(parts[0], 10) + '年' + parseInt(parts[1], 10) + '月');
+  }
+  var altText = altTextParts.join('・') + 'のカレンダー';
+
+  // バブルが1つならBubble、複数ならCarouselとして送信
+  var contents;
+  if (bubbles.length === 1) {
+    contents = bubbles[0];
+  } else {
+    contents = {
+      type: 'carousel',
+      contents: bubbles
+    };
+  }
+
+  return { altText: altText, contents: contents };
+}
+
+/**
+ * 1ヶ月分のカレンダーBubble Flex Messageオブジェクトを組み立てます。
+ * 日曜始まりのグリッドレイアウトで、⚠️イベントはフッターに補足テキストを追加します。
+ * @param {Object} monthData { target_month: "YYYY-MM", is_main: boolean, events: Array }
+ * @return {Object} Bubble Flex Messageオブジェクト
+ */
+function buildMonthBubble(monthData) {
+  var targetMonth = monthData.target_month;
+  var events = monthData.events || [];
+  // is_mainが明示されていない場合はtrueとして扱う
+  var isMain = (monthData.is_main !== false);
+
+  // 年・月を文字列から安全にパース
+  var monthParts = targetMonth.split('-');
+  var year = parseInt(monthParts[0], 10);
+  var month = parseInt(monthParts[1], 10);
+
+  // 1日の曜日（0=日, 1=月, ..., 6=土）と月末日を計算
+  var firstDayOfWeek = new Date(year, month - 1, 1).getDay();
+  var lastDay = new Date(year, month, 0).getDate();
+
+  // events配列をタイムゾーン安全な日付パース（文字列のまま処理）でマッピング
+  var eventMap = {};
+  for (var k = 0; k < events.length; k++) {
+    var ev = events[k];
+    var d = parseInt(ev.date.split('-')[2], 10);
+    eventMap[d] = ev;
+  }
+
+  // カレンダーグリッドの組み立て（日曜始まり）
+  var calendarRows = [];
+  var currentWeek = [];
+
+  // 月初前の空白マスを埋める
+  for (var i = 0; i < firstDayOfWeek; i++) {
+    currentWeek.push(buildEmptyCell_());
+  }
+
+  // 1日〜末日をループしてマスを生成
+  for (var day = 1; day <= lastDay; day++) {
+    var dayEvent = eventMap[day];
+    // is_main: trueの月はデフォルトを❌、is_main: falseの月はデフォルト空欄
+    var status = dayEvent ? dayEvent.status : (isMain ? '❌' : '');
+    currentWeek.push(buildDayCell_(day, status));
+
+    // 7マス（土曜日）到達または末日で1週間分の行を確定
+    if (currentWeek.length === 7 || day === lastDay) {
+      // 末週の残りマスを空白で埋める
+      while (currentWeek.length < 7) {
+        currentWeek.push(buildEmptyCell_());
+      }
+      calendarRows.push({
+        type: 'box',
+        layout: 'horizontal',
+        margin: 'sm',
+        contents: currentWeek
+      });
+      currentWeek = [];
+    }
+  }
+
+  // ⚠️補足テキスト（特別予定の詳細）の収集
+  var notesContents = [];
+  for (var n = 0; n < events.length; n++) {
+    var noteEv = events[n];
+    if (noteEv.status === '⚠️' && noteEv.note) {
+      var noteDay = parseInt(noteEv.date.split('-')[2], 10);
+      notesContents.push({
+        type: 'text',
+        text: '・' + noteDay + '日: ' + noteEv.note,
+        size: 'xs',
+        color: '#666666',
+        wrap: true
+      });
+    }
+  }
+
+  // Bubble bodyの組み立て（タイトル・区切り・曜日ヘッダー・グリッド）
+  var bodyContents = [
+    {
+      type: 'text',
+      text: year + '年 ' + month + '月 スケジュール',
+      weight: 'bold',
+      size: 'md',
+      color: '#111111'
+    },
+    { type: 'separator', margin: 'md' },
+    {
+      type: 'box',
+      layout: 'horizontal',
+      margin: 'md',
+      contents: [
+        { type: 'text', text: '日', size: 'xs', color: '#CC0000', align: 'center', weight: 'bold', flex: 1 },
+        { type: 'text', text: '月', size: 'xs', color: '#111111', align: 'center', weight: 'bold', flex: 1 },
+        { type: 'text', text: '火', size: 'xs', color: '#111111', align: 'center', weight: 'bold', flex: 1 },
+        { type: 'text', text: '水', size: 'xs', color: '#111111', align: 'center', weight: 'bold', flex: 1 },
+        { type: 'text', text: '木', size: 'xs', color: '#111111', align: 'center', weight: 'bold', flex: 1 },
+        { type: 'text', text: '金', size: 'xs', color: '#111111', align: 'center', weight: 'bold', flex: 1 },
+        { type: 'text', text: '土', size: 'xs', color: '#0055CC', align: 'center', weight: 'bold', flex: 1 }
+      ]
+    },
+    { type: 'separator', margin: 'sm' }
+  ].concat(calendarRows);
+
+  var bubble = {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      paddingAll: 'md',
+      contents: bodyContents
+    }
+  };
+
+  // ⚠️補足がある場合のみフッターセクションを追加
+  if (notesContents.length > 0) {
+    bubble.footer = {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      paddingAll: 'md',
+      contents: [
+        { type: 'text', text: '【⚠️ 特別な予定・変更】', size: 'xs', weight: 'bold', color: '#333333' }
+      ].concat(notesContents)
+    };
+  }
+
+  return bubble;
+}
+
+/**
+ * カレンダーの1マス（日付＋ステータス記号）を生成します。
+ * 空白マスと型を統一するためbox要素を使用します。
+ * @param {number} day 日付（1〜31）
+ * @param {string} status ステータス記号（🟣/❌/⚠️/空文字）
+ * @return {Object} Flex Message box要素
+ */
+function buildDayCell_(day, status) {
+  return {
+    type: 'box',
+    layout: 'vertical',
+    alignItems: 'center',
+    flex: 1,
+    contents: [
+      { type: 'text', text: String(day), size: 'xs', align: 'center', color: '#555555' },
+      { type: 'text', text: status || ' ', size: 'sm', align: 'center', margin: 'xs' }
+    ]
+  };
+}
+
+/**
+ * カレンダーの空白マス（月初・月末の余白埋め用）を生成します。
+ * buildDayCell_と同じbox構造に統一することでレイアウト崩れを防ぎます。
+ * @return {Object} Flex Message box要素
+ */
+function buildEmptyCell_() {
+  return {
+    type: 'box',
+    layout: 'vertical',
+    flex: 1,
+    contents: [
+      { type: 'text', text: ' ', size: 'xs', align: 'center' },
+      { type: 'text', text: ' ', size: 'sm', align: 'center', margin: 'xs' }
+    ]
+  };
 }
