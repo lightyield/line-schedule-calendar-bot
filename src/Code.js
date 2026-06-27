@@ -361,7 +361,11 @@ function correctYears_(geminiResult) {
  * @return {Object} { altText: string, contents: Object } LINE Flex Messageオブジェクト
  */
 function buildCarouselFlexMessage(geminiResult) {
-  var months = geminiResult.months || [];
+  var months = (geminiResult.months || []).slice();
+  // target_month（YYYY-MM）の昇順にソートして左から右へ年月順に並べる
+  months.sort(function(a, b) {
+    return a.target_month < b.target_month ? -1 : a.target_month > b.target_month ? 1 : 0;
+  });
   var bubbles = [];
   for (var i = 0; i < months.length; i++) {
     bubbles.push(buildMonthBubble(months[i]));
