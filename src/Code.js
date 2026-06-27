@@ -1,6 +1,7 @@
 /**
  * LINE Schedule Calendar Bot - Google Apps Script
  * Main logic for handling webhook events, buffering, and scheduling processing triggers.
+ * @version 1.0.1 - Auto-deploy test
  */
 
 /**
