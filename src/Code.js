@@ -182,7 +182,17 @@ function processBuffer() {
     var combinedText = group.texts.join('\n---\n');
 
     try {
+      // 日付が含まれているかチェック
+      console.log('[processBuffer] combinedText: ' + combinedText.substring(0, 100));
+      var hasDate = containsDate_(combinedText);
+      console.log('[processBuffer] containsDate_: ' + hasDate);
+      if (!hasDate) {
+        pushToLine(sourceId, '【エラー】メッセージに日付が含まれていません。\n\n例）「7月5日 病院」「7/5 打ち合わせ」のように、日付を含めてスケジュールを送信してください。');
+        continue;
+      }
+
       // Gemini APIを呼び出してJSON文字列を取得
+      console.log('[processBuffer] Calling Gemini...');
       var calendarJson = callGemini(combinedText);
 
       // Geminiが ```json ... ``` を付けてしまうケースに備えてクリーニング
@@ -193,6 +203,12 @@ function processBuffer() {
       } catch (parseErr) {
         console.error('JSON parse error: ' + parseErr.toString() + '\nRaw response: ' + calendarJson);
         throw new Error('カレンダーデータの解析に失敗しました。再度スケジュールを送信してみてください。');
+      }
+
+      // Geminiが空のmonths配列を返した場合はエラーとして扱う
+      console.log('[processBuffer] geminiResult.months length: ' + (geminiResult.months ? geminiResult.months.length : 'null'));
+      if (!geminiResult.months || geminiResult.months.length === 0) {
+        throw new Error('スケジュールを認識できませんでした。日付と予定を含めてもう一度送信してください。');
       }
 
       // GASシステム日付を基準に、Geminiが誤った年を補完した場合でも強制的に正しい年へ上書きする
@@ -379,6 +395,11 @@ function buildCarouselFlexMessage(geminiResult) {
   }
   var altText = altTextParts.join('・') + 'のカレンダー';
 
+  // バブルが0件の場合はエラーをスロー（空のカロテルはLINE APIで400エラーになるため）
+  if (bubbles.length === 0) {
+    throw new Error('スケジュールを認識できませんでした。日付と予定を含めてもう一度送信してください。');
+  }
+
   // バブルが1つならBubble、複数ならCarouselとして送信
   var contents;
   if (bubbles.length === 1) {
@@ -559,4 +580,31 @@ function buildEmptyCell_() {
       { type: 'text', text: ' ', size: 'sm', align: 'center', margin: 'xs' }
     ]
   };
+}
+
+/**
+ * テキストに日付らしき文字列が含まれているかチェックします。
+ * 以下のパターンを許容します：
+ *   - 日本語表記: 「7月5日」「7月」など
+ *   - スラッシュ区切り: 「7/5」「07/05」
+ *   - ハイフン区切り: 「2026-07-05」「07-05」
+ *   - ドット区切り: 「7.5」「07.05」
+ *   - 日本語の「明日」「今日」「来週」「今週」「来月」「今月」
+ * @param {string} text チェック対象のテキスト
+ * @return {boolean} 日付が含まれていればtrue
+ */
+function containsDate_(text) {
+  var patterns = [
+    /\d{1,2}月\d{1,2}日/,           // 7月5日
+    /\d{1,2}月/,                     // 7月 (単独の月表記)
+    /\d{1,2}\/\d{1,2}/,             // 7/5
+    /\d{4}-\d{1,2}-\d{1,2}/,        // 2026-07-05
+    /\d{1,2}-\d{1,2}/,              // 07-05
+    /\d{1,2}\.\d{1,2}/,             // 7.5
+    /今日|明日|明後日|今週|来週|今月|来月/  // 自然言語の日付表現
+  ];
+  for (var i = 0; i < patterns.length; i++) {
+    if (patterns[i].test(text)) return true;
+  }
+  return false;
 }

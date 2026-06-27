@@ -11,7 +11,7 @@
     "login": "clasp login",
     "push": "clasp push",
     "pull": "clasp pull",
-    "deploy": "clasp deploy"
+    "deploy": "clasp push && clasp deploy"
   },
   "repository": {
     "type": "git",
