@@ -195,6 +195,10 @@ function processBuffer() {
         throw new Error('カレンダーデータの解析に失敗しました。再度スケジュールを送信してみてください。');
       }
 
+      // GASシステム日付を基準に、Geminiが誤った年を補完した場合でも強制的に正しい年へ上書きする
+      // ※ buildMonthBubbleは year/month から曜日を独自計算するため、年を修正すれば曜日も正しくなる
+      geminiResult = correctYears_(geminiResult);
+
       // Flex Message（Carousel）を組み立ててLINEにプッシュ送信
       // （デバウンス処理による遅延でreplyTokenが失効するため、Push APIを使用）
       var flexMessage = buildCarouselFlexMessage(geminiResult);
@@ -307,6 +311,48 @@ function pushFlexToLine(toId, flexMessage) {
   if (responseCode !== 200) {
     throw new Error('LINE Push API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
   }
+}
+
+/**
+ * GASのシステム日付を基準に、Geminiが出力した年が誤っている場合に正しい年へ上書きします。
+ * スケジュールは未来の予定であるため、以下のルールで年を決定します：
+ *   - 言及月 >= 現在月 → 現在年
+ *   - 言及月 <  現在月 → 翌年
+ * target_month と各 event の date フィールドを両方修正します。
+ * @param {Object} geminiResult Geminiが返したパース済みJSONオブジェクト { months: Array }
+ * @return {Object} 年修正済みのJSONオブジェクト
+ */
+function correctYears_(geminiResult) {
+  var now = new Date();
+  var currentYear = now.getFullYear();
+  var currentMonth = now.getMonth() + 1; // 0-indexed → 1-indexed
+
+  var months = geminiResult.months || [];
+  for (var i = 0; i < months.length; i++) {
+    var monthData = months[i];
+    var parts = (monthData.target_month || '').split('-');
+    if (parts.length < 2) continue;
+
+    var eventMonth = parseInt(parts[1], 10);
+    // 言及月が現在月以上 → 現在年、未満 → 翌年
+    var correctYear = (eventMonth >= currentMonth) ? currentYear : (currentYear + 1);
+
+    // target_month を修正（例: "2020-07" → "2026-07"）
+    monthData.target_month = correctYear + '-' + parts[1];
+
+    // 各 event の date を修正（例: "2020-07-05" → "2026-07-05"）
+    var events = monthData.events || [];
+    for (var j = 0; j < events.length; j++) {
+      var dateParts = (events[j].date || '').split('-');
+      if (dateParts.length === 3) {
+        events[j].date = correctYear + '-' + dateParts[1] + '-' + dateParts[2];
+      }
+    }
+
+    console.info('Year corrected: ' + parts[0] + '-' + parts[1] + ' → ' + monthData.target_month);
+  }
+
+  return geminiResult;
 }
 
 /**

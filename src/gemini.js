@@ -8,12 +8,25 @@
  * Geminiに対してマークダウンではなく、複数月対応の構造化JSONのみを返すよう指示します。
  * @return {string} システムプロンプトの文字列
  */
-function getSystemPrompt() {
+function getSystemPrompt(referenceYear, referenceMonth) {
+  var yearHint = [
+    '### ⚠️ 年の補完ルール（重要）',
+    '現在の日付（GASシステム日時）: ' + referenceYear + '年' + referenceMonth + '月',
+    'スケジュールメッセージに西暦年が明記されていない場合は、以下のルールで年を補完してください：',
+    '- 言及されている月 >= 現在の月 → ' + referenceYear + '年として扱う',
+    '- 言及されている月 < 現在の月  → ' + (referenceYear + 1) + '年として扱う（翌年の予定）',
+    '絶対に過去の年（例: 2020年）を使用しないでください。'
+  ].join('\n');
+
   return [
     '# 依頼：スケジュールを解析し、指定のJSONフォーマットで出力してください',
     '',
     '以下の【スケジュール】から日付ごとの予定を月別に抽出し、指定の【JSONフォーマット】のみを出力してください。',
     'マークダウンのコードブロック（```json ... ```）などの装飾は一切不要です。純粋なJSON文字列のみを返してください。',
+    '',
+    '---',
+    '',
+    yearHint,
     '',
     '---',
     '',
@@ -60,7 +73,12 @@ function callGemini(text) {
   var primaryModel = properties.getProperty('GEMINI_MODEL') || 'gemini-3.5-flash';
   var fallbackModel = properties.getProperty('GEMINI_FALLBACK_MODEL') || 'gemini-2.5-flash';
 
-  var systemInstruction = getSystemPrompt();
+  // GASシステム日付から現在の年・月を取得し、年補完ヒントとしてプロンプトに渡す
+  var now = new Date();
+  var currentYear = now.getFullYear();
+  var currentMonth = now.getMonth() + 1; // 0-indexed → 1-indexed
+
+  var systemInstruction = getSystemPrompt(currentYear, currentMonth);
   // systemInstructionがAPI v1で動作しない場合があるため、プロンプトの冒頭に指示を結合して送信します
   var combinedPrompt = systemInstruction + '\n\n【スケジュール情報】\n' + text;
 
