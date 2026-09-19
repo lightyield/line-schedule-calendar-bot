@@ -66,7 +66,7 @@ GASにAPIキーなどのシークレット情報を安全に設定します。
 | :--- | :--- | :--- |
 | `GEMINI_API_KEY` | `AIzaSy...` (手順1で取得したもの) | Gemini API用のアクセスキー |
 | `LINE_CHANNEL_ACCESS_TOKEN` | `LINE_CHANNEL_ACCESS_TOKEN` (手順2で取得したもの) | LINEへのメッセージ返信用トークン |
-| `GEMINI_MODEL` | `gemini-2.0-flash` (推奨) | 使用するGeminiモデル（未指定時は `gemini-2.0-flash` が適用されます） |
+| `GEMINI_MODEL` | （任意） | 特定のモデルを優先指定したい場合のみ設定（未設定時は動的選定モデルを自動利用） |
 
 3. **「スクリプトプロパティを保存」** をクリックします。
 

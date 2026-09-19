@@ -608,3 +608,25 @@ function containsDate_(text) {
   }
   return false;
 }
+
+// ----------------------------------------------------
+// Jest テスト用エクスポート (GAS本番環境では無視される)
+// ----------------------------------------------------
+if (typeof module !== 'undefined') {
+  module.exports = {
+    doPost: doPost,
+    getSourceId: getSourceId,
+    setupDebounceTrigger: setupDebounceTrigger,
+    cleanupTriggers: cleanupTriggers,
+    processBuffer: processBuffer,
+    pushToLine: pushToLine,
+    pushFlexToLine: pushFlexToLine,
+    correctYears_: correctYears_,
+    buildCarouselFlexMessage: buildCarouselFlexMessage,
+    buildMonthBubble: buildMonthBubble,
+    buildDayCell_: buildDayCell_,
+    buildEmptyCell_: buildEmptyCell_,
+    containsDate_: containsDate_
+  };
+}
+
