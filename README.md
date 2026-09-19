@@ -26,13 +26,13 @@ LINEの仕様上、複数メッセージを「一括転送」すると、シス�
        │    ※ models.list APIから利用可能な最新Flashモデルを動的に取得・ソート
        │    ※ 503エラー時は指数バックオフでリトライ、404時は次候補モデルへ自動フォールバック
        │    ※ 429/400時はサーキットブレーカー発動
-       ├─③ Geminiが返したJSONを解析し、Flex Message (Carousel) を動的生成
+       ├─③ Geminiが返したJSONを解析し、月ごとのFlex Message (Bubble) を動的生成
        └─④ スプレッドシートのバッファをクリア
        │
        ▼ (AIがスケジュールデータをJSONで生成)
 [Gemini API (Google AI Studio)]
        │
-       ▼ (構造化JSON → Flex Message (Carousel) を動的生成)
+       ▼ (構造化JSON → 月ごとのFlex Messageを縦並びで動的生成)
 [LINE (グループチャットへ返信：Flex Message)]
 
 ---
@@ -161,7 +161,7 @@ GASに組み込むシステムプロンプトの原本です。Geminiへの指�
 }
 ```
 
-> Geminiの返答はGAS側で解析され、複数月の場合はLINEの **Flex Message (Carousel)** として送信されます。単一月の場合は単一バブルの Flex Message として送信されます。
+> Geminiの返答はGAS側で解析され、月ごとの独立した **Flex Message (Bubble)** としてLINEに縦並びで送信されます（複数月がある場合でも横スクロールではなく、上から下へ月順に投稿されます）。
 
 ### 🗓 年の自動補完・修正（二重保護）
 

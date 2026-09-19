@@ -78,8 +78,10 @@ const {
   setupDebounceTrigger,
   cleanupTriggers,
   correctYears_,
+  buildCalendarFlexMessages,
   buildCarouselFlexMessage,
   buildMonthBubble,
+  pushFlexToLine,
   containsDate_
 } = require('./Code');
 
@@ -153,8 +155,8 @@ describe('年補正ロジック (correctYears_)', () => {
   });
 });
 
-describe('Flex Message 構築 (buildCarouselFlexMessage / buildMonthBubble)', () => {
-  test('単月データからBubble Flex Messageを構築できること', () => {
+describe('Flex Message 構築 (buildCalendarFlexMessages / buildMonthBubble)', () => {
+  test('単月データから単一のFlex Message配列を構築できること', () => {
     const data = {
       months: [
         {
@@ -168,33 +170,107 @@ describe('Flex Message 構築 (buildCarouselFlexMessage / buildMonthBubble)', ()
       ]
     };
 
-    const flex = buildCarouselFlexMessage(data);
-    expect(flex.altText).toBe('2026年7月のカレンダー');
-    expect(flex.contents.type).toBe('bubble');
-    expect(flex.contents.body).toBeDefined();
-    expect(flex.contents.footer).toBeDefined(); // ⚠️があるためfooterが生成される
+    const flexMessages = buildCalendarFlexMessages(data);
+    expect(flexMessages.length).toBe(1);
+    expect(flexMessages[0].type).toBe('flex');
+    expect(flexMessages[0].altText).toBe('2026年7月のカレンダー');
+    expect(flexMessages[0].contents.type).toBe('bubble');
+    expect(flexMessages[0].contents.body).toBeDefined();
+    expect(flexMessages[0].contents.footer).toBeDefined(); // ⚠️があるためfooterが生成される
   });
 
-  test('複数月データからCarousel Flex Messageを構築できること', () => {
+  test('複数月データから各月独立したFlex Message配列（縦並び用）を構築できること', () => {
     const data = {
       months: [
         {
-          target_month: '2026-08',
+          target_month: '2026-10',
           is_main: false,
-          events: [{ date: '2026-08-01', status: '🟣', note: '' }]
+          events: [{ date: '2026-10-04', status: '⚠️', note: '10:30' }]
         },
+        {
+          target_month: '2026-09',
+          is_main: true,
+          events: [{ date: '2026-09-29', status: '🟣', note: '' }]
+        }
+      ]
+    };
+
+    const flexMessages = buildCalendarFlexMessages(data);
+    expect(flexMessages.length).toBe(2);
+    // target_month 昇順（9月 → 10月）にソートされていること
+    expect(flexMessages[0].altText).toBe('2026年9月のカレンダー');
+    expect(flexMessages[0].contents.type).toBe('bubble');
+    expect(flexMessages[1].altText).toBe('2026年10月のカレンダー');
+    expect(flexMessages[1].contents.type).toBe('bubble');
+  });
+
+  test('後方互換性エイリアス buildCarouselFlexMessage が動作すること', () => {
+    const data = {
+      months: [
         {
           target_month: '2026-07',
           is_main: true,
           events: [{ date: '2026-07-05', status: '🟣', note: '' }]
+        },
+        {
+          target_month: '2026-08',
+          is_main: false,
+          events: [{ date: '2026-08-01', status: '🟣', note: '' }]
         }
       ]
     };
 
     const flex = buildCarouselFlexMessage(data);
-    expect(flex.altText).toBe('2026年7月・2026年8月のカレンダー'); // ソートされて7月・8月順
     expect(flex.contents.type).toBe('carousel');
     expect(flex.contents.contents.length).toBe(2);
+  });
+});
+
+describe('LINE プッシュ送信処理 (pushFlexToLine)', () => {
+  test('複数のFlex Messageを1回のリクエストで送信できること', () => {
+    global.UrlFetchApp.fetch.mockReturnValue({
+      getResponseCode: () => 200,
+      getContentText: () => '{"status":"ok"}'
+    });
+
+    const messages = [
+      { type: 'flex', altText: '9月', contents: { type: 'bubble' } },
+      { type: 'flex', altText: '10月', contents: { type: 'bubble' } }
+    ];
+
+    pushFlexToLine('group-123', messages);
+
+    expect(global.UrlFetchApp.fetch).toHaveBeenCalledTimes(1);
+    const callArgs = global.UrlFetchApp.fetch.mock.calls[0];
+    const payload = JSON.parse(callArgs[1].payload);
+    expect(payload.to).toBe('group-123');
+    expect(payload.messages.length).toBe(2);
+    expect(payload.messages[0].altText).toBe('9月');
+    expect(payload.messages[1].altText).toBe('10月');
+  });
+
+  test('6件以上のメッセージがある場合は5件ずつチャンク分割して送信すること', () => {
+    global.UrlFetchApp.fetch.mockReturnValue({
+      getResponseCode: () => 200,
+      getContentText: () => '{"status":"ok"}'
+    });
+
+    const messages = [
+      { type: 'flex', altText: '1月', contents: { type: 'bubble' } },
+      { type: 'flex', altText: '2月', contents: { type: 'bubble' } },
+      { type: 'flex', altText: '3月', contents: { type: 'bubble' } },
+      { type: 'flex', altText: '4月', contents: { type: 'bubble' } },
+      { type: 'flex', altText: '5月', contents: { type: 'bubble' } },
+      { type: 'flex', altText: '6月', contents: { type: 'bubble' } }
+    ];
+
+    pushFlexToLine('group-123', messages);
+
+    expect(global.UrlFetchApp.fetch).toHaveBeenCalledTimes(2);
+    const payload1 = JSON.parse(global.UrlFetchApp.fetch.mock.calls[0][1].payload);
+    const payload2 = JSON.parse(global.UrlFetchApp.fetch.mock.calls[1][1].payload);
+    expect(payload1.messages.length).toBe(5);
+    expect(payload2.messages.length).toBe(1);
   });
 });
 
