@@ -83,7 +83,7 @@ const {
   buildMonthBubble,
   pushFlexToLine,
   containsDate_
-} = require('./Code');
+} = require('../src/Code');
 
 // ============================================================
 // テストスイート

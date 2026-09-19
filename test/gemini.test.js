@@ -32,7 +32,7 @@ const {
   getAvailableGeminiModels,
   callGemini,
   callGeminiWithRetry_
-} = require('./gemini');
+} = require('../src/gemini');
 
 // ============================================================
 // テストスイート

@@ -1,0 +1,13 @@
+# Ignore all files by default or exclude non-GAS files
+**/*.test.js
+**/*.spec.js
+tests/**
+test/**
+__tests__/**
+.git/**
+.github/**
+node_modules/**
+docs/**
+package.json
+package-lock.json
+README.md
