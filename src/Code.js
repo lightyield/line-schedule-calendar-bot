@@ -215,10 +215,10 @@ function processBuffer() {
       // ※ buildMonthBubbleは year/month から曜日を独自計算するため、年を修正すれば曜日も正しくなる
       geminiResult = correctYears_(geminiResult);
 
-      // Flex Message（Carousel）を組み立ててLINEにプッシュ送信
-      // （デバウンス処理による遅延でreplyTokenが失効するため、Push APIを使用）
-      var flexMessage = buildCarouselFlexMessage(geminiResult);
-      pushFlexToLine(sourceId, flexMessage);
+      // Flex Message（月ごとの個別Bubble）を組み立ててLINEにプッシュ送信
+      // （複数月ある場合は各月が独立した吹き出しとして縦並びに投稿されます）
+      var flexMessages = buildCalendarFlexMessages(geminiResult);
+      pushFlexToLine(sourceId, flexMessages);
     } catch (err) {
       console.error('Error processing buffer for source ' + sourceId + ': ' + err.toString());
       
@@ -289,43 +289,63 @@ function pushToLine(toId, text) {
 
 /**
  * LINE Messaging API を用いてFlex Messageをプッシュ送信します。
+ * 単一のFlex MessageオブジェクトまたはFlex Messageオブジェクトの配列を受け付けます。
+ * 複数月がある場合は各月を個別のメッセージとして配列で送信することで、LINE上で縦並びに表示されます。
+ * （LINE Push APIの仕様上、1リクエストにつき最大5メッセージまで含めることができます）
  * @param {string} toId 送信先ID（ユーザーID、グループID、またはルームID）
- * @param {Object} flexMessage { altText: string, contents: Object } Flex Messageオブジェクト
+ * @param {Object|Array<Object>} flexMessages Flex Messageオブジェクトまたはその配列
  */
-function pushFlexToLine(toId, flexMessage) {
+function pushFlexToLine(toId, flexMessages) {
   var token = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
   if (!token) {
     throw new Error('LINE_CHANNEL_ACCESS_TOKEN がスクリプトプロパティに設定されていません。');
   }
 
-  var url = 'https://api.line.me/v2/bot/message/push';
-  var payload = {
-    to: toId,
-    messages: [
-      {
+  var list = Array.isArray(flexMessages) ? flexMessages : [flexMessages];
+  if (list.length === 0) return;
+
+  // メッセージ形式を正規化（{ type: 'flex', altText, contents }）
+  var normalizedMessages = [];
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i];
+    if (item.type === 'flex') {
+      normalizedMessages.push(item);
+    } else {
+      normalizedMessages.push({
         type: 'flex',
-        altText: flexMessage.altText,
-        contents: flexMessage.contents
-      }
-    ]
-  };
+        altText: item.altText,
+        contents: item.contents
+      });
+    }
+  }
 
-  var options = {
-    method: 'post',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + token
-    },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
+  var url = 'https://api.line.me/v2/bot/message/push';
+  var chunkSize = 5; // LINE Push APIの1リクエストあたりのメッセージ上限
 
-  var response = UrlFetchApp.fetch(url, options);
-  var responseCode = response.getResponseCode();
-  var responseText = response.getContentText();
+  for (var j = 0; j < normalizedMessages.length; j += chunkSize) {
+    var chunk = normalizedMessages.slice(j, j + chunkSize);
+    var payload = {
+      to: toId,
+      messages: chunk
+    };
 
-  if (responseCode !== 200) {
-    throw new Error('LINE Push API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
+    var options = {
+      method: 'post',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+
+    var response = UrlFetchApp.fetch(url, options);
+    var responseCode = response.getResponseCode();
+    var responseText = response.getContentText();
+
+    if (responseCode !== 200) {
+      throw new Error('LINE Push API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
+    }
   }
 }
 
@@ -372,46 +392,55 @@ function correctYears_(geminiResult) {
 }
 
 /**
- * GeminiのJSONからLINE Flex Message（単月はBubble、複数月はCarousel）を組み立てます。
+ * GeminiのJSONからLINE Flex Messageの配列（各月ごとの個別Bubble）を組み立てます。
+ * 複数月がある場合もカルーセル（横並び）ではなく、月ごとに独立したメッセージとして縦並びに投稿されます。
  * @param {Object} geminiResult Geminiが返したパース済みJSONオブジェクト { months: Array }
- * @return {Object} { altText: string, contents: Object } LINE Flex Messageオブジェクト
+ * @return {Array<Object>} LINE Flex Messageオブジェクトの配列 [ { type: 'flex', altText: string, contents: Object }, ... ]
  */
-function buildCarouselFlexMessage(geminiResult) {
+function buildCalendarFlexMessages(geminiResult) {
   var months = (geminiResult.months || []).slice();
-  // target_month（YYYY-MM）の昇順にソートして左から右へ年月順に並べる
+  // target_month（YYYY-MM）の昇順にソートして上から下へ年月順に並べる
   months.sort(function(a, b) {
     return a.target_month < b.target_month ? -1 : a.target_month > b.target_month ? 1 : 0;
   });
-  var bubbles = [];
-  for (var i = 0; i < months.length; i++) {
-    bubbles.push(buildMonthBubble(months[i]));
-  }
 
-  // altText生成（例: "2026年7月・8月のカレンダー"）
-  var altTextParts = [];
-  for (var j = 0; j < months.length; j++) {
-    var parts = months[j].target_month.split('-');
-    altTextParts.push(parseInt(parts[0], 10) + '年' + parseInt(parts[1], 10) + '月');
-  }
-  var altText = altTextParts.join('・') + 'のカレンダー';
-
-  // バブルが0件の場合はエラーをスロー（空のカロテルはLINE APIで400エラーになるため）
-  if (bubbles.length === 0) {
+  if (months.length === 0) {
     throw new Error('スケジュールを認識できませんでした。日付と予定を含めてもう一度送信してください。');
   }
 
-  // バブルが1つならBubble、複数ならCarouselとして送信
-  var contents;
-  if (bubbles.length === 1) {
-    contents = bubbles[0];
-  } else {
-    contents = {
-      type: 'carousel',
-      contents: bubbles
-    };
+  var flexMessages = [];
+  for (var i = 0; i < months.length; i++) {
+    var monthData = months[i];
+    var parts = monthData.target_month.split('-');
+    var altText = parseInt(parts[0], 10) + '年' + parseInt(parts[1], 10) + '月のカレンダー';
+    var bubble = buildMonthBubble(monthData);
+
+    flexMessages.push({
+      type: 'flex',
+      altText: altText,
+      contents: bubble
+    });
   }
 
-  return { altText: altText, contents: contents };
+  return flexMessages;
+}
+
+/**
+ * 互換性のためのエイリアス関数（過去の呼び出しとの互換性を維持）
+ * @deprecated buildCalendarFlexMessages を使用してください
+ */
+function buildCarouselFlexMessage(geminiResult) {
+  var messages = buildCalendarFlexMessages(geminiResult);
+  if (messages.length === 1) {
+    return messages[0];
+  }
+  return {
+    altText: messages.map(function(m) { return m.altText.replace('のカレンダー', ''); }).join('・') + 'のカレンダー',
+    contents: {
+      type: 'carousel',
+      contents: messages.map(function(m) { return m.contents; })
+    }
+  };
 }
 
 /**
@@ -622,6 +651,7 @@ if (typeof module !== 'undefined') {
     pushToLine: pushToLine,
     pushFlexToLine: pushFlexToLine,
     correctYears_: correctYears_,
+    buildCalendarFlexMessages: buildCalendarFlexMessages,
     buildCarouselFlexMessage: buildCarouselFlexMessage,
     buildMonthBubble: buildMonthBubble,
     buildDayCell_: buildDayCell_,
