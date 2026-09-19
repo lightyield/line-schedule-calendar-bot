@@ -48,8 +48,9 @@ LINEの仕様上、複数メッセージを「一括転送」すると、シス�
 ## 📂 リポジトリ構成
 - [src/Code.js](src/Code.js) : GASメインプログラム（Webhook・トリガー処理・Flex Message生成）
 - [src/gemini.js](src/gemini.js) : Gemini API連携・動的モデル選定・フォールバック・プロンプト管理
-- [src/gemini.test.js](src/gemini.test.js) : 動的モデル選定・API呼び出し・フォールバックの単体テスト
-- [src/Code.test.js](src/Code.test.js) : 日付解析・年補正・Flex Message構築等の単体テスト
+- [test/gemini.test.js](test/gemini.test.js) : 動的モデル選定・API呼び出し・フォールバックの単体テスト
+- [test/Code.test.js](test/Code.test.js) : 日付解析・年補正・Flex Message構築等の単体テスト
+- [.claspignore](.claspignore) : GASデプロイ時の除外設定ファイル
 - [docs/setup_guide.md](docs/setup_guide.md) : 環境構築マニュアル（LINE/AI Studio/GAS連携設定）
 - [docs/cicd_setup.md](docs/cicd_setup.md) : CI/CD環境構築マニュアル（claspとGitHub Actionsによる自動デプロイ設定）
 
