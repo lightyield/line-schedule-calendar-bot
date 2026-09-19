@@ -57,11 +57,100 @@ function getSystemPrompt(referenceYear, referenceMonth) {
 }
 
 /**
- * Gemini API を呼び出してカレンダー形式のテキストを生成します。
- * 一時的エラー（503/429）発生時は指数バックオフでリトライし、
- * すべて失敗した場合はフォールバックモデルで再試行します。
+ * 利用可能なGeminiモデル一覧を動的に取得し、スケジュール解析・JSON生成に適したFlash系モデルを優先順にソートして返却する
+ * @param {string} apiKey - Gemini APIキー
+ * @returns {string[]} 利用可能なモデル名（ID）のリスト
+ */
+function getAvailableGeminiModels(apiKey) {
+  var DEFAULT_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  var MAX_CANDIDATE_MODELS = 3;
+  if (!apiKey) return DEFAULT_MODELS;
+
+  try {
+    var url = 'https://generativelanguage.googleapis.com/v1beta/models?key=' + apiKey;
+    var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    
+    if (response.getResponseCode() !== 200) {
+      console.warn('Geminiモデル一覧取得失敗 (HTTP ' + response.getResponseCode() + '): ', response.getContentText());
+      return DEFAULT_MODELS;
+    }
+
+    var data = JSON.parse(response.getContentText());
+    if (!data.models || !Array.isArray(data.models)) {
+      return DEFAULT_MODELS;
+    }
+
+    // 1. generateContent をサポートしているモデルを抽出
+    var candidates = data.models.filter(function(m) {
+      if (!m.name) return false;
+      var methods = m.supportedGenerationMethods || [];
+      return methods.indexOf('generateContent') !== -1;
+    }).map(function(m) {
+      return m.name.replace(/^models\//, '');
+    });
+
+    // 2. 特殊用途モデル（画像生成、TTS、ネイティブオーディオプレビューなど）を除外
+    var validModels = candidates.filter(function(name) {
+      var lower = name.toLowerCase();
+      if (lower.indexOf('image') !== -1 || lower.indexOf('tts') !== -1 || lower.indexOf('audio') !== -1 || lower.indexOf('realtime') !== -1 || lower.indexOf('embedding') !== -1) {
+        return false;
+      }
+      return true;
+    });
+
+    // 3. Flash系モデルを優先し、バージョン降順でソート
+    var flashModels = validModels.filter(function(m) {
+      return m.toLowerCase().indexOf('flash') !== -1;
+    });
+    var otherModels = validModels.filter(function(m) {
+      return m.toLowerCase().indexOf('flash') === -1 && m.toLowerCase().indexOf('gemini-') === 0;
+    });
+
+    var sortFn = function(a, b) {
+      // プレビュー・実験用より安定版を優先
+      var isPreviewA = a.indexOf('preview') !== -1 || a.indexOf('exp') !== -1;
+      var isPreviewB = b.indexOf('preview') !== -1 || b.indexOf('exp') !== -1;
+      if (isPreviewA !== isPreviewB) {
+        return isPreviewA ? 1 : -1;
+      }
+      // バージョン番号の抽出比較 (例: gemini-2.5-flash -> 2.5)
+      var vA = (a.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0';
+      var vB = (b.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0';
+      var numA = parseFloat(vA);
+      var numB = parseFloat(vB);
+      if (numA !== numB) {
+        return numB - numA; // 降順
+      }
+      // -lite は標準版の後に配置
+      var isLiteA = a.indexOf('lite') !== -1;
+      var isLiteB = b.indexOf('lite') !== -1;
+      if (isLiteA !== isLiteB) {
+        return isLiteA ? 1 : -1;
+      }
+      return a.localeCompare(b);
+    };
+
+    flashModels.sort(sortFn);
+    otherModels.sort(sortFn);
+
+    var result = flashModels.concat(otherModels);
+    if (result.length > 0) {
+      return result.slice(0, MAX_CANDIDATE_MODELS);
+    }
+
+    return DEFAULT_MODELS;
+  } catch (e) {
+    console.warn('Geminiモデル一覧取得中に例外が発生しました: ', e);
+    return DEFAULT_MODELS;
+  }
+}
+
+/**
+ * Gemini API を呼び出してカレンダー形式のJSONテキストを生成します。
+ * models.list APIから利用可能なモデル一覧を動的に取得し、優先順に試行します。
+ * 一時的エラー（503等）発生時は指数バックオフでリトライし、モデル未検出（404）やリトライ上限超過時は次候補モデルへ自動フォールバックします。
  * @param {string} text 結合されたメッセージテキスト
- * @return {string} 生成されたカレンダーのマークダウンテキスト
+ * @return {string} 生成されたカレンダーのJSONテキスト
  */
 function callGemini(text) {
   var properties = PropertiesService.getScriptProperties();
@@ -70,8 +159,14 @@ function callGemini(text) {
     throw new Error('GEMINI_API_KEY がスクリプトプロパティに設定されていません。');
   }
 
-  var primaryModel = properties.getProperty('GEMINI_MODEL') || 'gemini-3.5-flash';
-  var fallbackModel = properties.getProperty('GEMINI_FALLBACK_MODEL') || 'gemini-2.5-flash';
+  // 利用可能なモデル一覧を動的に取得
+  var dynamicModels = getAvailableGeminiModels(apiKey);
+  var customModel = properties.getProperty('GEMINI_MODEL');
+  var modelList = dynamicModels.slice();
+  if (customModel) {
+    // カスタム指定モデルがある場合は先頭に配置（重複排除）
+    modelList = [customModel].concat(modelList.filter(function(m) { return m !== customModel; }));
+  }
 
   // GASシステム日付から現在の年・月を取得し、年補完ヒントとしてプロンプトに渡す
   var now = new Date();
@@ -79,7 +174,6 @@ function callGemini(text) {
   var currentMonth = now.getMonth() + 1; // 0-indexed → 1-indexed
 
   var systemInstruction = getSystemPrompt(currentYear, currentMonth);
-  // systemInstructionがAPI v1で動作しない場合があるため、プロンプトの冒頭に指示を結合して送信します
   var combinedPrompt = systemInstruction + '\n\n【スケジュール情報】\n' + text;
 
   var payload = {
@@ -97,25 +191,28 @@ function callGemini(text) {
     }
   };
 
-  // まずプライマリモデルで試行
-  var result = callGeminiWithRetry_(apiKey, primaryModel, payload);
-  if (result.success) {
-    return result.text;
-  }
-
-  // プライマリモデルが一時的エラーで全リトライ失敗した場合、フォールバックモデルで再試行
-  if (result.isTransientError && fallbackModel !== primaryModel) {
-    console.info('プライマリモデル (' + primaryModel + ') が利用不可のため、フォールバックモデル (' + fallbackModel + ') で再試行します。');
-    var fallbackResult = callGeminiWithRetry_(apiKey, fallbackModel, payload);
-    if (fallbackResult.success) {
-      return fallbackResult.text;
+  var lastError = null;
+  for (var m = 0; m < modelList.length; m++) {
+    var currentModel = modelList[m];
+    var result = callGeminiWithRetry_(apiKey, currentModel, payload);
+    if (result.success) {
+      return result.text;
     }
-    // フォールバックも失敗した場合は、フォールバックのエラーをスロー
-    throw fallbackResult.lastError;
+
+    lastError = result.lastError;
+
+    // 429（レート制限）や400（不正リクエスト）などの恒常的・キー単位エラーは即時スロー（無駄な探索を防止）
+    if (result.isFatalError) {
+      throw lastError;
+    }
+
+    // 次のモデルへフォールバック
+    if (m < modelList.length - 1) {
+      console.warn('モデル ' + currentModel + ' での呼び出しに失敗したため、次候補モデル ' + modelList[m + 1] + ' へフォールバックします。');
+    }
   }
 
-  // 一時的エラーではない場合、またはフォールバックなしの場合
-  throw result.lastError;
+  throw lastError || new Error('すべてのGeminiモデル候補でリクエストが失敗しました。');
 }
 
 /**
@@ -123,10 +220,10 @@ function callGemini(text) {
  * @param {string} apiKey APIキー
  * @param {string} model モデル名
  * @param {Object} payload リクエストボディ
- * @return {Object} { success: boolean, text?: string, lastError?: Error, isTransientError: boolean }
+ * @return {Object} { success: boolean, text?: string, lastError?: Error, isTransientError: boolean, isFatalError: boolean }
  */
 function callGeminiWithRetry_(apiKey, model, payload) {
-  var url = 'https://generativelanguage.googleapis.com/v1/models/' + model + ':generateContent?key=' + apiKey;
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + apiKey;
 
   var options = {
     method: 'post',
@@ -135,10 +232,9 @@ function callGeminiWithRetry_(apiKey, model, payload) {
     muteHttpExceptions: true
   };
 
-  var maxRetries = 5;      // 最大リトライ回数
-  var baseDelay = 3000;    // 初回待機時間（3秒）
+  var maxRetries = 3;      // 最大リトライ回数
+  var baseDelay = 1500;    // 初回待機時間（1.5秒）
   var lastError = null;
-  var wasTransientError = false;
 
   for (var attempt = 0; attempt < maxRetries; attempt++) {
     var response;
@@ -147,7 +243,6 @@ function callGeminiWithRetry_(apiKey, model, payload) {
     } catch (networkErr) {
       // ネットワークレベルの例外（タイムアウト等）
       lastError = networkErr;
-      wasTransientError = true;
       console.warn('モデル ' + model + ': API呼び出し中にネットワーク例外が発生しました（' + (attempt + 1) + '/' + maxRetries + '回目）: ' + networkErr.toString());
 
       if (attempt < maxRetries - 1) {
@@ -160,16 +255,33 @@ function callGeminiWithRetry_(apiKey, model, payload) {
     var responseCode = response.getResponseCode();
     var responseText = response.getContentText();
 
-    // 正常レスポンス
+    // 正常レスポンス (200)
     if (responseCode === 200) {
-      var json = JSON.parse(responseText);
-      if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts && json.candidates[0].content.parts[0]) {
-        return { success: true, text: json.candidates[0].content.parts[0].text, isTransientError: false };
-      } else {
+      try {
+        var json = JSON.parse(responseText);
+        if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts && json.candidates[0].content.parts[0]) {
+          return { success: true, text: json.candidates[0].content.parts[0].text, isTransientError: false, isFatalError: false };
+        } else if (json.candidates && json.candidates[0] && json.candidates[0].finishReason) {
+          return {
+            success: false,
+            lastError: new Error('Gemini API 判定ブロック (finishReason: ' + json.candidates[0].finishReason + ')'),
+            isTransientError: false,
+            isFatalError: true
+          };
+        } else {
+          return {
+            success: false,
+            lastError: new Error('Gemini APIのレスポンス構造が不正です: ' + responseText),
+            isTransientError: false,
+            isFatalError: false
+          };
+        }
+      } catch (parseE) {
         return {
           success: false,
-          lastError: new Error('Gemini APIのレスポンス構造が不正です: ' + responseText),
-          isTransientError: false
+          lastError: new Error('Gemini APIレスポンスJSONパース失敗: ' + parseE.toString()),
+          isTransientError: false,
+          isFatalError: false
         };
       }
     }
@@ -177,23 +289,46 @@ function callGeminiWithRetry_(apiKey, model, payload) {
     // エラーオブジェクトを生成
     lastError = new Error('Gemini API エラー (ステータスコード: ' + responseCode + '): ' + responseText);
 
-    // 一時的なエラー（503: サービス一時停止、429: レート制限）以外の場合はリトライせず即時返却
-    var isTransientError = (responseCode === 503 || responseCode === 429);
-    if (!isTransientError) {
-      return { success: false, lastError: lastError, isTransientError: false };
+    // 429 (クォータ超過・レートリミット) または 400 (不正リクエスト)
+    if (responseCode === 429 || responseCode === 400) {
+      console.warn('モデル ' + model + ': APIエラー (' + responseCode + '): ' + responseText);
+      return { success: false, lastError: lastError, isTransientError: false, isFatalError: true };
     }
 
-    wasTransientError = true;
+    // 404 (モデルが存在しない / 廃止された)
+    if (responseCode === 404) {
+      console.warn('モデル ' + model + ' が見つかりません (HTTP 404)。フォールバックを試行します。');
+      return { success: false, lastError: lastError, isTransientError: false, isFatalError: false };
+    }
 
-    if (attempt < maxRetries - 1) {
-      console.warn('モデル ' + model + ': 一時的エラー ' + responseCode + '（' + (attempt + 1) + '/' + maxRetries + '回目）。リトライします...');
-      var delay = baseDelay * Math.pow(2, attempt);
-      Utilities.sleep(delay);
+    // 503 (一時的な高負荷) などの一時的エラーはリトライ
+    var isTransient = (responseCode === 503 || responseCode === 500 || responseCode === 504);
+    if (isTransient) {
+      if (attempt < maxRetries - 1) {
+        console.warn('モデル ' + model + ': 一時的エラー ' + responseCode + '（' + (attempt + 1) + '/' + maxRetries + '回目）。リトライします...');
+        var delay = baseDelay * Math.pow(2, attempt);
+        Utilities.sleep(delay);
+      } else {
+        console.warn('モデル ' + model + ': 一時的エラー ' + responseCode + '（' + (attempt + 1) + '/' + maxRetries + '回目）。リトライ上限に達しました。');
+      }
     } else {
-      console.warn('モデル ' + model + ': 一時的エラー ' + responseCode + '（' + (attempt + 1) + '/' + maxRetries + '回目）。リトライ上限に達しました。');
+      // その他の恒常的エラー
+      return { success: false, lastError: lastError, isTransientError: false, isFatalError: false };
     }
   }
 
-  // すべてのリトライが失敗
-  return { success: false, lastError: lastError, isTransientError: wasTransientError };
+  // すべてのリトライが失敗（次候補モデルへフォールバック可能）
+  return { success: false, lastError: lastError, isTransientError: true, isFatalError: false };
+}
+
+// ----------------------------------------------------
+// Jest テスト用エクスポート (GAS本番環境では無視される)
+// ----------------------------------------------------
+if (typeof module !== 'undefined') {
+  module.exports = {
+    getSystemPrompt: getSystemPrompt,
+    getAvailableGeminiModels: getAvailableGeminiModels,
+    callGemini: callGemini,
+    callGeminiWithRetry_: callGeminiWithRetry_
+  };
 }
