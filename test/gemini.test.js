@@ -53,7 +53,7 @@ describe('Gemini 動的モデル選定 (getAvailableGeminiModels)', () => {
     expect(models).toEqual(['gemini-2.5-flash', 'gemini-2.5-flash-lite']);
   });
 
-  test('利用可能モデル一覧からgenerateContent対応・Flash優先・バージョン降順でソートして最大3件返却すること', () => {
+  test('利用可能モデル一覧から特性分散型（最新標準・最新Lite・成熟下位標準）で最大3件返却すること', () => {
     const mockApiResponse = {
       models: [
         { name: 'models/gemini-1.5-pro', supportedGenerationMethods: ['generateContent'] },
@@ -74,11 +74,38 @@ describe('Gemini 動的モデル選定 (getAvailableGeminiModels)', () => {
 
     const models = getAvailableGeminiModels('test-key');
 
-    // gemini-2.5-flash -> gemini-2.5-flash-lite -> gemini-2.0-flash (上位3件)
+    // ①最新標準(gemini-2.5-flash) -> ②最新Lite(gemini-2.5-flash-lite) -> ③成熟標準(gemini-1.5-flash)
     expect(models).toEqual([
       'gemini-2.5-flash',
       'gemini-2.5-flash-lite',
-      'gemini-2.0-flash'
+      'gemini-1.5-flash'
+    ]);
+  });
+
+  test('多数のFlashモデルが存在する場合、最新標準・最新Lite・成熟下位標準を自動選出すること', () => {
+    const mockApiResponse = {
+      models: [
+        { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-2.5-flash-lite', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-3.5-flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-3.5-flash-lite', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-3.6-flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-3.7-flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-3.8-flash', supportedGenerationMethods: ['generateContent'] },
+      ]
+    };
+
+    global.UrlFetchApp.fetch.mockReturnValue({
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify(mockApiResponse)
+    });
+
+    const models = getAvailableGeminiModels('test-key');
+
+    expect(models).toEqual([
+      'gemini-3.8-flash',      // ① 最新標準
+      'gemini-3.5-flash-lite', // ② 最新Lite
+      'gemini-2.5-flash',      // ③ 成熟標準
     ]);
   });
 
