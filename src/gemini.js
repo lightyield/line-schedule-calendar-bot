@@ -133,12 +133,57 @@ function getAvailableGeminiModels(apiKey) {
     flashModels.sort(sortFn);
     otherModels.sort(sortFn);
 
-    var result = flashModels.concat(otherModels);
-    if (result.length > 0) {
-      return result.slice(0, MAX_CANDIDATE_MODELS);
+    var pool = flashModels.length > 0 ? flashModels : otherModels;
+    if (pool.length === 0) return DEFAULT_MODELS;
+
+    // 特性分散型の候補選定（最新標準モデル、最新Liteモデル、最も成熟した標準モデル）
+    var liteModels = pool.filter(function(m) {
+      return m.toLowerCase().indexOf('lite') !== -1;
+    });
+    var standardModels = pool.filter(function(m) {
+      return m.toLowerCase().indexOf('lite') === -1;
+    });
+
+    var selected = [];
+
+    // ① 最新の標準Flashモデル（先頭）
+    if (standardModels.length > 0) {
+      selected.push(standardModels[0]);
     }
 
-    return DEFAULT_MODELS;
+    // ② 最新の軽量Liteモデル（先頭）- 軽量・別クラスタで過負荷耐性が高い
+    if (liteModels.length > 0 && selected.indexOf(liteModels[0]) === -1) {
+      selected.push(liteModels[0]);
+    }
+
+    // ③ 最も成熟した標準Flashモデル（末尾）- インフラが確立しており安定稼働
+    if (standardModels.length > 1) {
+      var stableStandards = standardModels.filter(function(m) {
+        var lower = m.toLowerCase();
+        return lower.indexOf('preview') === -1 && lower.indexOf('exp') === -1;
+      });
+      var matureModel = stableStandards.length > 0 ? stableStandards[stableStandards.length - 1] : standardModels[standardModels.length - 1];
+      if (selected.indexOf(matureModel) === -1) {
+        selected.push(matureModel);
+      }
+    }
+
+    // 候補数が上限（3件）に満たない場合は、プールからバージョン降順で重複なく補完
+    for (var i = 0; i < pool.length; i++) {
+      if (selected.length >= MAX_CANDIDATE_MODELS) break;
+      if (selected.indexOf(pool[i]) === -1) {
+        selected.push(pool[i]);
+      }
+    }
+    // それでも足りず otherModels がある場合も補完
+    for (var j = 0; j < otherModels.length; j++) {
+      if (selected.length >= MAX_CANDIDATE_MODELS) break;
+      if (selected.indexOf(otherModels[j]) === -1) {
+        selected.push(otherModels[j]);
+      }
+    }
+
+    return selected.slice(0, MAX_CANDIDATE_MODELS);
   } catch (e) {
     console.warn('Geminiモデル一覧取得中に例外が発生しました: ', e);
     return DEFAULT_MODELS;
