@@ -1,0 +1,260 @@
+name: Sync Dependabot Alerts to Issues
+
+on:
+  schedule:
+    # 毎日 09:00 JST (00:00 UTC) に実行
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  security-events: read
+
+concurrency:
+  group: dependabot-alerts-to-issues-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync Dependabot alerts to package-grouped issues
+        uses: actions/github-script@v7
+        env:
+          DEPENDABOT_ALERTS_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const alertsToken = process.env.DEPENDABOT_ALERTS_TOKEN;
+
+            if (!alertsToken) {
+              core.setFailed(
+                'シークレット DEPENDABOT_ALERTS_TOKEN が未設定です。' +
+                'Dependabot alerts: Read-only 権限を持つ Fine-grained PAT を作成し、' +
+                'リポジトリの Settings > Secrets and variables > Actions に登録してください。'
+              );
+              return;
+            }
+
+            const SEVERITY_ORDER = { critical: 4, high: 3, medium: 2, low: 1 };
+            const LABELS = [
+              { name: 'security', color: 'd73a4a', description: 'セキュリティ関連・脆弱性対応' },
+              { name: 'dependabot', color: '0366d6', description: 'Dependabot alerts により検出された依存パッケージの脆弱性' },
+            ];
+
+            // 1. Fetch all open Dependabot alerts using DEPENDABOT_ALERTS_TOKEN
+            async function fetchAllOpenAlerts() {
+              const alerts = [];
+              let url = `https://api.github.com/repos/${owner}/${repo}/dependabot/alerts?state=open&per_page=100`;
+
+              while (url) {
+                const res = await fetch(url, {
+                  headers: {
+                    Authorization: `Bearer ${alertsToken}`,
+                    Accept: 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                    'User-Agent': 'dependabot-alerts-to-issues',
+                  },
+                });
+
+                if (res.status === 404 || res.status === 403) {
+                  const bodyText = await res.text();
+                  if (bodyText.includes('Dependabot alerts are disabled') || res.status === 404) {
+                    core.warning(`Dependabot alerts が無効のためスキップします (${res.status}): ${bodyText}`);
+                    return null;
+                  }
+                  throw new Error(`Dependabot alerts API error (${res.status}): ${bodyText}`);
+                }
+
+                if (!res.ok) {
+                  throw new Error(`Dependabot alerts API error (${res.status}): ${await res.text()}`);
+                }
+
+                const page = await res.json();
+                if (Array.isArray(page)) {
+                  alerts.push(...page);
+                }
+
+                const linkHeader = res.headers.get('link') || '';
+                const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+                url = nextMatch ? nextMatch[1] : null;
+              }
+              return alerts;
+            }
+
+            // 2. Ensure required labels exist
+            async function ensureLabels() {
+              const existing = await github.paginate(github.rest.issues.listLabelsForRepo, {
+                owner,
+                repo,
+                per_page: 100,
+              });
+              const existingNames = new Set(existing.map((l) => l.name.toLowerCase()));
+
+              for (const label of LABELS) {
+                if (!existingNames.has(label.name.toLowerCase())) {
+                  await github.rest.issues.createLabel({
+                    owner,
+                    repo,
+                    name: label.name,
+                    color: label.color,
+                    description: label.description,
+                  });
+                  core.info(`Created label: ${label.name}`);
+                }
+              }
+            }
+
+            function escapePipe(text) {
+              if (!text) return '';
+              return String(text).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+            }
+
+            function buildIssueContent(ecosystem, pkg, pkgAlerts) {
+              const sortedAlerts = [...pkgAlerts].sort((a, b) => {
+                const sevA = SEVERITY_ORDER[(a.security_advisory?.severity || 'low').toLowerCase()] || 0;
+                const sevB = SEVERITY_ORDER[(b.security_advisory?.severity || 'low').toLowerCase()] || 0;
+                if (sevB !== sevA) return sevB - sevA;
+                return (b.number || 0) - (a.number || 0);
+              });
+
+              const topSev = (sortedAlerts[0].security_advisory?.severity || 'low').toUpperCase();
+              const manifests = [...new Set(sortedAlerts.map((a) => a.dependency?.manifest_path || '-'))].sort();
+              const manifestStr = manifests.map((m) => `\`${m}\``).join(', ');
+
+              const marker = `<!-- dependabot-alert-sync: ${ecosystem}/${pkg} -->`;
+              const title = `[Security] ${pkg} の脆弱性対応 (${sortedAlerts.length}件 / 最高: ${topSev})`;
+
+              const rows = sortedAlerts.map((a) => {
+                const adv = a.security_advisory || {};
+                const vuln = a.security_vulnerability || {};
+                const sev = (adv.severity || 'low').toUpperCase();
+                const ids = [adv.cve_id, adv.ghsa_id].filter(Boolean).join(' / ') || '-';
+                const patched = vuln.first_patched_version?.identifier
+                  ? `\`${vuln.first_patched_version.identifier}\``
+                  : '未定';
+                const summary = escapePipe(adv.summary || '-');
+                return `| [#${a.number}](${a.html_url}) | ${sev} | ${ids} | ${patched} | ${summary} |`;
+              });
+
+              const body = [
+                marker,
+                '## 概要',
+                `Dependabot alerts により、\`${pkg}\`（\`${ecosystem}\`）で **${sortedAlerts.length}件** の脆弱性が検出されています。`,
+                '',
+                `- **パッケージ**: \`${pkg}\` (\`${ecosystem}\`)`,
+                `- **マニフェスト**: ${manifestStr}`,
+                `- **最高重要度**: \`${topSev}\``,
+                `- **オープン中のアラート件数**: ${sortedAlerts.length}件`,
+                '',
+                '## 検出されたアラート一覧',
+                '',
+                '| Alert # | 重要度 | CVE / GHSA | パッチ済みバージョン | 概要 |',
+                '| :--- | :---: | :--- | :--- | :--- |',
+                ...rows,
+                '',
+                '---',
+                '*この Issue は Dependabot alerts 同期ワークフローにより自動管理されています。アラートがすべて解消されると自動的にクローズされます。*',
+              ].join('\n');
+
+              return { marker, title, body };
+            }
+
+            const alerts = await fetchAllOpenAlerts();
+            if (alerts === null) return;
+
+            core.info(`Fetched ${alerts.length} open Dependabot alerts.`);
+
+            // Group alerts by ecosystem/package
+            const grouped = new Map();
+            for (const a of alerts) {
+              const eco = a.dependency?.package?.ecosystem || 'unknown';
+              const pkg = a.dependency?.package?.name || 'unknown';
+              const key = `${eco}/${pkg}`;
+              if (!grouped.has(key)) grouped.set(key, { eco, pkg, alerts: [] });
+              grouped.get(key).alerts.push(a);
+            }
+
+            if (grouped.size > 0) {
+              await ensureLabels();
+            }
+
+            // Fetch existing open dependabot issues
+            const existingIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              labels: 'dependabot',
+              per_page: 100,
+            });
+
+            const markerToIssue = new Map();
+            for (const iss of existingIssues) {
+              if (iss.pull_request) continue;
+              const lines = (iss.body || '').split(/\r?\n/).slice(0, 5);
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith('<!-- dependabot-alert-sync:') && trimmed.endsWith('-->')) {
+                  markerToIssue.set(trimmed, iss);
+                  break;
+                }
+              }
+            }
+
+            const activeMarkers = new Set();
+
+            // Create or update issues for active packages
+            const sortedGroups = [...grouped.values()].sort((a, b) => {
+              const maxA = Math.max(...a.alerts.map((x) => SEVERITY_ORDER[(x.security_advisory?.severity || 'low').toLowerCase()] || 0));
+              const maxB = Math.max(...b.alerts.map((x) => SEVERITY_ORDER[(x.security_advisory?.severity || 'low').toLowerCase()] || 0));
+              if (maxB !== maxA) return maxB - maxA;
+              if (b.alerts.length !== a.alerts.length) return b.alerts.length - a.alerts.length;
+              return a.pkg.localeCompare(b.pkg);
+            });
+
+            for (const { eco, pkg, alerts: pkgAlerts } of sortedGroups) {
+              const { marker, title, body } = buildIssueContent(eco, pkg, pkgAlerts);
+              activeMarkers.add(marker);
+
+              const existing = markerToIssue.get(marker);
+              if (!existing) {
+                const { data: created } = await github.rest.issues.create({
+                  owner,
+                  repo,
+                  title,
+                  body,
+                  labels: ['security', 'dependabot'],
+                });
+                core.info(`Created issue #${created.number}: ${title}`);
+              } else if (existing.title !== title || (existing.body || '') !== body) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  title,
+                  body,
+                });
+                core.info(`Updated issue #${existing.number}: ${title}`);
+              } else {
+                core.info(`No change for issue #${existing.number}: ${title}`);
+              }
+            }
+
+            // Auto-close issues whose alerts are all resolved
+            for (const [marker, iss] of markerToIssue.entries()) {
+              if (!activeMarkers.has(marker)) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: iss.number,
+                  body: '対象パッケージのオープンな Dependabot alerts がすべて解消されたため、この Issue を自動的にクローズします。',
+                });
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: iss.number,
+                  state: 'closed',
+                });
+                core.info(`Closed resolved issue #${iss.number}: ${iss.title}`);
+              }
+            }

@@ -187,3 +187,16 @@ GASに組み込むシステムプロンプトの原本です。Geminiへの指�
 `main` ブランチへのプッシュまたはプルリクエストのマージ時に、GAS プロジェクトへ自動で最新コードが反映されます。
 
 詳細な導入・設定手順については、**[GAS CI/CD 環境 構築ガイド](docs/cicd_setup.md)** を参照してください。
+
+---
+
+## 🔒 セキュリティ運用（Dependabot alerts の自動 Issue 化）
+
+[.github/workflows/dependabot-alerts-to-issues.yml](.github/workflows/dependabot-alerts-to-issues.yml) により、毎日 09:00 JST（または手動実行 `workflow_dispatch`）にオープン中の Dependabot alerts を取得し、パッケージ単位で GitHub Issue（ラベル: `security`, `dependabot`）を自動作成・更新します。対象パッケージのアラートがすべて解消されると該当 Issue を自動的にクローズします。
+
+### 必要な GitHub Secrets
+リポジトリの Settings > Secrets and variables > Actions に以下を登録してください。
+
+| Secret名 | 内容 |
+| :--- | :--- |
+| `DEPENDABOT_ALERTS_TOKEN` | `Dependabot alerts: Read-only` 権限を付与した Fine-grained Personal Access Token |
