@@ -25,7 +25,7 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-            const alertsToken = process.env.DEPENDABOT_ALERTS_TOKEN;
+            const alertsToken = (process.env.DEPENDABOT_ALERTS_TOKEN || '').replace(/[\s\u2028\u2029\uFEFF]+/g, '');
 
             if (!alertsToken) {
               core.setFailed(
